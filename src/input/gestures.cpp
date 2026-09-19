@@ -390,11 +390,12 @@ namespace umbriel {
           m_state = State::Idle;
         }
       } else {
-        // Travel along the workspace axis switches workspaces.
+        // Travel along the workspace axis switches workspaces. Neighbors are
+        // namespace-relative, matching slideBegin.
         WorkspaceGroup* group = out->workspaceGroup();
-        const size_t idx = group->active()->index();
-        m_hasPrev = idx > 0;
-        m_hasNext = idx + 1 < group->workspaceCount();
+        Workspace* active = group->active();
+        m_hasPrev = group->prevWorkspaceInNamespace(active) != nullptr;
+        m_hasNext = group->nextWorkspaceInNamespace(active) != nullptr;
         if (!group->slideBegin(m_hasPrev, m_hasNext)) {
           m_state = State::Idle;
           return;

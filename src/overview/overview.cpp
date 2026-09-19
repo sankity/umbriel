@@ -2963,7 +2963,8 @@ namespace umbriel {
 
     bool insertedWorkspace = false;
     if (insertionGroup != nullptr) {
-      target = insertionGroup->insertDynamicWorkspace(m_dropWorkspaceIndex);
+      // Gap drops create into the group's navigation context.
+      target = insertionGroup->insertDynamicWorkspace(m_dropWorkspaceIndex, insertionGroup->activeNamespace());
       dropState = target != nullptr ? stateForWorkspace(target) : nullptr;
       if (target != nullptr && dropState != nullptr) {
         targetDrop = {

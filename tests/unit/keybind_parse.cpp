@@ -512,6 +512,88 @@ UMBRIEL_TEST(rejectsMalformedWorkspaceSelectors) {
   CHECK(!parseAction("column-move-to-workspace:/DP-1", bind));
 }
 
+UMBRIEL_TEST(parsesNamespaceSwitch) {
+  Keybind bind;
+  CHECK(parseAction("namespace-switch", bind));
+  CHECK(bind.action == KeybindAction::NamespaceSwitch);
+  const auto* bare = umbriel::payloadIf<umbriel::NamespaceArg>(bind);
+  CHECK(bare != nullptr);
+  CHECK(bare != nullptr && bare->name.empty() && bare->output.empty());
+
+  CHECK(parseAction("namespace-switch:coding", bind));
+  const auto* named = umbriel::payloadIf<umbriel::NamespaceArg>(bind);
+  CHECK(named != nullptr);
+  CHECK(named != nullptr && named->name == "coding" && named->output.empty());
+
+  CHECK(parseAction("namespace-switch:coding/DP-1", bind));
+  const auto* qualified = umbriel::payloadIf<umbriel::NamespaceArg>(bind);
+  CHECK(qualified != nullptr);
+  CHECK(qualified != nullptr && qualified->name == "coding" && qualified->output == "DP-1");
+
+  // Empty name selects the default namespace, including with an output.
+  CHECK(parseAction("namespace-switch:/DP-1", bind));
+  const auto* def = umbriel::payloadIf<umbriel::NamespaceArg>(bind);
+  CHECK(def != nullptr);
+  CHECK(def != nullptr && def->name.empty() && def->output == "DP-1");
+}
+
+UMBRIEL_TEST(rejectsMalformedNamespaceSwitch) {
+  Keybind bind;
+  CHECK(!parseAction("namespace-switch:", bind));        // no selector; use the bare form
+  CHECK(!parseAction("namespace-switch:coding/", bind)); // empty output
+  CHECK(!parseAction("namespace-switch:a/b/c", bind));   // two separators
+  CHECK(!parseAction("namespace-switch:a=b", bind));     // `=` is not a namespace character
+}
+
+UMBRIEL_TEST(parsesWorkspaceSetNamespace) {
+  Keybind bind;
+  CHECK(parseAction("workspace-set-namespace:2=coding", bind));
+  CHECK(bind.action == KeybindAction::WorkspaceSetNamespace);
+  const auto* position = umbriel::payloadIf<umbriel::WorkspaceNamespaceArg>(bind);
+  CHECK(position != nullptr);
+  const auto* positionValue =
+      position != nullptr ? std::get_if<umbriel::WorkspaceIndex>(&position->workspace.reference) : nullptr;
+  CHECK(positionValue != nullptr && positionValue->value == 2);
+  CHECK(position != nullptr && position->namespaceId == "coding");
+
+  // Empty namespace selects the default namespace.
+  CHECK(parseAction("workspace-set-namespace:CHAT=", bind));
+  const auto* toDefault = umbriel::payloadIf<umbriel::WorkspaceNamespaceArg>(bind);
+  CHECK(toDefault != nullptr && toDefault->namespaceId.empty());
+
+  // Workspace names containing `=` split at the last one.
+  CHECK(parseAction("workspace-set-namespace:a=b=coding", bind));
+  const auto* tricky = umbriel::payloadIf<umbriel::WorkspaceNamespaceArg>(bind);
+  CHECK(tricky != nullptr);
+  const auto* trickyName =
+      tricky != nullptr ? std::get_if<umbriel::WorkspaceName>(&tricky->workspace.reference) : nullptr;
+  CHECK(trickyName != nullptr && trickyName->value == "a=b");
+  CHECK(tricky != nullptr && tricky->namespaceId == "coding");
+
+  CHECK(parseAction("workspace-set-namespace:CHAT/DP-1=work", bind));
+  const auto* qualified = umbriel::payloadIf<umbriel::WorkspaceNamespaceArg>(bind);
+  CHECK(qualified != nullptr && qualified->workspace.output == "DP-1");
+  CHECK(qualified != nullptr && qualified->namespaceId == "work");
+
+  // A workspace name ending in `=` still splits at the last one.
+  CHECK(parseAction("workspace-set-namespace:2=a=b", bind));
+  const auto* trailing = umbriel::payloadIf<umbriel::WorkspaceNamespaceArg>(bind);
+  CHECK(trailing != nullptr);
+  const auto* trailingName =
+      trailing != nullptr ? std::get_if<umbriel::WorkspaceName>(&trailing->workspace.reference) : nullptr;
+  CHECK(trailingName != nullptr && trailingName->value == "2=a");
+  CHECK(trailing != nullptr && trailing->namespaceId == "b");
+}
+
+UMBRIEL_TEST(rejectsMalformedWorkspaceSetNamespace) {
+  Keybind bind;
+  CHECK(!parseAction("workspace-set-namespace", bind));         // requires an argument
+  CHECK(!parseAction("workspace-set-namespace:", bind));        // empty selector
+  CHECK(!parseAction("workspace-set-namespace:2", bind));       // missing `=<namespace>`
+  CHECK(!parseAction("workspace-set-namespace:=coding", bind)); // empty workspace
+  CHECK(!parseAction("workspace-set-namespace:2=a/b", bind));   // `/` is not a namespace character
+}
+
 UMBRIEL_TEST(parsesOptionalOutputActions) {
   const auto outputOf = [](const Keybind& bind) {
     const auto* arg = umbriel::payloadIf<umbriel::OutputArg>(bind);
@@ -610,6 +692,12 @@ UMBRIEL_TEST(payloadAlternativeMatchesTheDeclaredArgKind) {
     case ActionArgKind::WindowId:
       input += ":abc";
       break;
+    case ActionArgKind::Namespace:
+      input += ":coding";
+      break;
+    case ActionArgKind::WorkspaceNamespace:
+      input += ":1=coding";
+      break;
     }
     CHECK(parseAction(input, bind));
 
@@ -632,6 +720,12 @@ UMBRIEL_TEST(payloadAlternativeMatchesTheDeclaredArgKind) {
       break;
     case ActionArgKind::Workspace:
       CHECK(umbriel::payloadIf<umbriel::WorkspaceArg>(bind) != nullptr);
+      break;
+    case ActionArgKind::Namespace:
+      CHECK(umbriel::payloadIf<umbriel::NamespaceArg>(bind) != nullptr);
+      break;
+    case ActionArgKind::WorkspaceNamespace:
+      CHECK(umbriel::payloadIf<umbriel::WorkspaceNamespaceArg>(bind) != nullptr);
       break;
     case ActionArgKind::OptionalOutput:
       CHECK(umbriel::payloadIf<umbriel::OutputArg>(bind) != nullptr);
@@ -694,6 +788,12 @@ UMBRIEL_TEST(everyActionSpecRoundTripsThroughParseAction) {
       break;
     case ActionArgKind::WindowId:
       input += ":abc";
+      break;
+    case ActionArgKind::Namespace:
+      input += ":coding";
+      break;
+    case ActionArgKind::WorkspaceNamespace:
+      input += ":1=coding";
       break;
     }
     if (!parseAction(input, bind)) {
@@ -803,6 +903,10 @@ UMBRIEL_TEST(everyAdvertisedActionParsesWithItsDeclaredArgument) {
       return ":1";
     case ActionArgKind::OptionalOutput:
       return ":DP-1";
+    case ActionArgKind::Namespace:
+      return ":coding";
+    case ActionArgKind::WorkspaceNamespace:
+      return ":1=coding";
     case ActionArgKind::OptionalScratchpad:
       return ":terminal";
     case ActionArgKind::WindowId:
@@ -830,6 +934,10 @@ UMBRIEL_TEST(everyAdvertisedActionParsesWithItsDeclaredArgument) {
       return "<workspace>[/<output>]";
     case ActionArgKind::OptionalOutput:
       return "[<output>]";
+    case ActionArgKind::Namespace:
+      return "[<namespace>][/<output>]";
+    case ActionArgKind::WorkspaceNamespace:
+      return "<workspace>[/<output>]=[<namespace>]";
     case ActionArgKind::OptionalScratchpad:
       return "[<scratchpad>]";
     case ActionArgKind::WindowId:

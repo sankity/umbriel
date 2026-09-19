@@ -19,7 +19,7 @@ printf '{"cmd":"workspaces"}\n' | socat -t 5 STDIO "$UMBRIEL_SOCKET"
 | Request | CLI | Reply |
 | ------- | --- | ----- |
 | `{"cmd":"windows"}` | `umbriel windows --json` | window list with ids, app ids, titles, client pids, geometry, workspace ids, and scratchpad membership |
-| `{"cmd":"workspaces"}` | `umbriel workspaces --json` | workspace list with names, named flags, indices, outputs, active/focused/occupied flags, layout modes |
+| `{"cmd":"workspaces"}` | `umbriel workspaces --json` | workspace list with names, named flags, namespaces, indices, outputs, active/focused/occupied flags, layout modes |
 | `{"cmd":"submap"}` | `umbriel submap --json` | active keybind submap, or `null` |
 | `{"cmd":"layers"}` | `umbriel layers --json` | layer-shell surfaces |
 | `{"cmd":"msg","arg":"<action>"}` | `umbriel msg <action>` | runs an [action](actions.md) |
@@ -58,6 +58,39 @@ Each workspace entry also carries an `occupied` boolean: `true` while the
 workspace holds at least one window, including windows that are not currently
 visible. A window stored in a scratchpad belongs to no workspace, so it does
 not make its return destination occupied.
+
+Each workspace entry also carries a `namespace` string: the opaque workspace
+namespace id, or an empty string for the default global namespace. The shell
+owns the vocabulary (for example, one id per Activity); the compositor only
+stores, filters, and reports it.
+
+Each workspace entry also carries an `active_namespace` string: the active
+namespace of the workspace's output group. Workspace navigation on that
+output operates on the workspaces whose `namespace` matches it; an empty
+`active_namespace` exposes every workspace. A client learns that the active
+namespace changed, that a workspace moved namespaces, or that reconciliation
+rebuilt the list the same way it learns anything else: the `workspaces` event
+family carries the full listing, so replacing state with the newest line is
+enough and no separate namespace event family exists.
+
+Two actions drive namespaces, and both are available over `msg` like every
+other action:
+
+```sh
+umbriel msg namespace-switch:coding        # switch the preferred output to coding
+umbriel msg namespace-switch              # switch the preferred output back to default
+umbriel msg workspace-set-namespace:2=coding  # move position 2 into coding
+```
+
+`namespace-switch` accepts `[<namespace>][/<output>]`: the bare form targets
+the cursor-preferred output, an empty name selects the default namespace, and
+repeating the current namespace is a silent no-op. Switching preserves the
+active workspace when it stays visible and otherwise selects the first
+workspace in the new namespace. `workspace-set-namespace` accepts
+`<workspace>[/<output>]=[<namespace>]` and moves exactly one workspace,
+preserving its id, name, and index; an empty namespace moves it back to
+default. Old clients that ignore the new fields keep working: with the
+default namespace everything behaves as before.
 
 ## Event stream
 

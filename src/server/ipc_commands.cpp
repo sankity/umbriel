@@ -400,6 +400,8 @@ namespace umbriel {
             {"id", workspace->id()},
             {"name", workspace->name()},
             {"named", workspace->named()},
+            {"namespace", workspace->namespaceId()},
+            {"active_namespace", group->activeNamespace()},
             {"index", workspace->index() + 1},
             {"output", output->wlr()->name},
             {"active", workspace->active()},

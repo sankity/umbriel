@@ -973,7 +973,8 @@ namespace umbriel {
         workspace = entry.returnWorkspaceNamed ? group->workspaceNamed(entry.returnWorkspace)
                                                : group->workspaceAtClamped(entry.returnWorkspaceIndex);
         if (!entry.returnWorkspaceNamed && group->dynamic() && workspace != nullptr && workspace->named()) {
-          workspace = group->insertDynamicWorkspace(entry.returnWorkspaceIndex);
+          // A fresh return slot joins the group's navigation context.
+          workspace = group->insertDynamicWorkspace(entry.returnWorkspaceIndex, group->activeNamespace());
         }
       }
       if (workspace == nullptr) {

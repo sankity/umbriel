@@ -132,6 +132,11 @@ namespace umbriel {
       std::string workspaceName;
       size_t workspaceIndex = 0;
       bool workspaceNamed = false;
+      // Namespace of the home workspace. Recorded so output-restore paths can
+      // stamp newly materialized workspaces instead of inheriting whatever
+      // namespace happens to be active when the output returns. Existing
+      // workspaces are never relabeled from this field.
+      std::string workspaceNamespace;
       std::shared_ptr<const LayoutSnapshot> layoutSnapshot;
       LayoutMemberId layoutMember = 0;
       bool ownsNamedScrollingColumnExtent = false;

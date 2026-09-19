@@ -513,6 +513,7 @@ pure_sources = files(
   'src/overview/shortcut_labels.cpp',
   'src/view/border_ring.cpp',
   'src/view/floating.cpp',
+  'src/workspace/namespace.cpp',
 )
 
 umbriel_pure_deps = [

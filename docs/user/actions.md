@@ -17,6 +17,8 @@ are required, `[bracket]` forms are optional.
 | `<cmd>` | Command line, run through the shell: `spawn:kitty` |
 | `<name>` | Submap to enter; `submap:reset` leaves one level |
 | `<workspace>[/<output>]` | Bare digits select a 1-based position, other text selects a name, and double quotes force a name; append `/output` to scope either form |
+| `<namespace>` | Workspace namespace id. Empty selects the default namespace. `/` and `=` are not namespace characters |
+| `[<namespace>][/<output>]` | Namespace id with an optional output scope; the bare form targets the cursor-preferred output |
 | `<window-id>` | Window id from `umbriel windows` |
 | `[<window-id>]` | The same id; the bare action targets the focused window |
 | `[<output>]` | Connector or monitor name. Bare `dpms-off` and `dpms-on` target every configured output |
@@ -153,6 +155,7 @@ described in [Workspace selectors](workspaces.md#workspace-selectors).
 | `column-move-to-workspace:<workspace>[/<output>]` | Move the focused column to the selected workspace |
 | `column-move-to-workspace-next` | Move the focused column to the next workspace |
 | `column-move-to-workspace-previous` | Move the focused column to the previous workspace |
+| `namespace-switch:[<namespace>][/<output>]` | Switch the active workspace namespace on one output |
 | `window-move-to-workspace:<workspace>[/<output>]` | Move the focused window to the selected workspace |
 | `window-move-to-workspace-next` | Move the focused window to the next workspace |
 | `window-move-to-workspace-previous` | Move the focused window to the previous workspace |
@@ -165,6 +168,7 @@ described in [Workspace selectors](workspaces.md#workspace-selectors).
 | `workspace-next` | Switch to the next workspace on this output |
 | `workspace-previous` | Switch to the previous workspace on this output |
 | `workspace-set-layout:<scrolling\|dwindle\|master\|toggle>` | Set the active workspace's layout mode |
+| `workspace-set-namespace:<workspace>[/<output>]=[<namespace>]` | Move a workspace to the selected namespace |
 | `workspace-swap-active-output-down` | Swap active workspace windows with the output below |
 | `workspace-swap-active-output-left` | Swap active workspace windows with the output left |
 | `workspace-swap-active-output-next` | Swap active workspace windows with the next output |

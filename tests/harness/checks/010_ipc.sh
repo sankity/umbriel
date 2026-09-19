@@ -138,6 +138,8 @@ if ! jq -e '
     and (has("active") and (.active | type == "boolean"))
     and (has("focused") and (.focused | type == "boolean"))
     and (has("occupied") and (.occupied | type == "boolean"))
+    and (has("namespace") and (.namespace | type == "string"))
+    and (has("active_namespace") and (.active_namespace | type == "string"))
     and (has("layout") and (.layout | type == "string"))
   )
   and ([.[] | select(.active)] | length == 1)

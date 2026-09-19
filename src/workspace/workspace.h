@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -56,6 +57,11 @@ namespace umbriel {
     // generated for anonymous static or dynamic positions leave this false.
     [[nodiscard]] bool named() const { return m_named; }
     [[nodiscard]] size_t index() const { return m_index; }
+    // Opaque workspace namespace id. Empty is the default global namespace and
+    // preserves existing behavior. The shell owns the vocabulary (e.g. one id
+    // per Activity); the compositor only stores, filters, and reports it.
+    [[nodiscard]] const std::string& namespaceId() const { return m_namespaceId; }
+    void setNamespaceId(std::string namespaceId);
     [[nodiscard]] bool active() const { return m_active; }
     [[nodiscard]] Layout& layout() { return *m_layout; }
     [[nodiscard]] const Layout& layout() const { return *m_layout; }
@@ -216,6 +222,7 @@ namespace umbriel {
     std::string m_name;
     size_t m_index = 0;
     bool m_named = false;
+    std::string m_namespaceId;
     bool m_active = false;
     std::vector<View*> m_views;
     std::vector<View*> m_floatingStack;
@@ -262,6 +269,23 @@ namespace umbriel {
     [[nodiscard]] Workspace* workspaceNamed(std::string_view name) const;
     [[nodiscard]] Workspace* workspaceFromHandle(wlr_ext_workspace_handle_v1* handle) const;
     [[nodiscard]] size_t workspaceCount() const { return m_workspaces.size(); }
+    // Active workspace namespace for this output group. Empty exposes every
+    // workspace (current behavior). A non-empty id restricts the navigation
+    // context to member workspaces; display positions derive from that subset
+    // while global workspace ids stay stable.
+    [[nodiscard]] const std::string& activeNamespace() const { return m_activeNamespace; }
+    void setActiveNamespace(std::string namespaceId);
+    // Namespace-filtered inventory views. Positions here are ranks within the
+    // active namespace, not global indices. Null returns mean out of range or
+    // hidden by the active namespace.
+    [[nodiscard]] size_t workspaceCountInNamespace() const;
+    [[nodiscard]] Workspace* workspaceAtInNamespace(size_t position) const;
+    // Dynamic groups clamp out-of-range positions to the last workspace in the
+    // namespace (mirroring workspaceAtClamped); static groups return null.
+    [[nodiscard]] Workspace* workspaceAtInNamespaceClamped(size_t position) const;
+    [[nodiscard]] std::optional<size_t> indexInNamespace(const Workspace* workspace) const;
+    [[nodiscard]] Workspace* nextWorkspaceInNamespace(const Workspace* workspace) const;
+    [[nodiscard]] Workspace* prevWorkspaceInNamespace(const Workspace* workspace) const;
     // Direction this output arranges its workspaces along, cached from configuration
     // so rendering and input never re-resolve it per event.
     [[nodiscard]] WorkspaceAxis workspaceAxis() const { return m_workspaceAxis; }
@@ -269,15 +293,17 @@ namespace umbriel {
     void activate(Workspace* workspace, bool animate = true);
     void select(Workspace* workspace);
     void deactivate(Workspace* workspace);
-    // Dynamic groups reuse their highest empty anonymous workspace before appending. Static groups reject protocol
+    // Dynamic groups reuse their highest empty anonymous workspace in the
+    // active namespace before appending. Static groups reject protocol
     // create requests because their configured inventory is exact.
     Workspace* createWorkspace(const char* name);
     // Acquire a destination for moving every window from another workspace. Static groups reuse their highest empty
-    // configured workspace without changing its identity; dynamic groups use the ordinary create behavior.
+    // configured workspace in the active namespace without changing its identity; dynamic groups use the ordinary
+    // create behavior.
     Workspace* transferDestination();
     // Insert an empty numbered workspace into a dynamic group and renumber the following workspaces. Static configured
-    // groups cannot be extended this way and return null.
-    Workspace* insertDynamicWorkspace(size_t index);
+    // groups cannot be extended this way and return null. The new workspace joins `namespaceId`.
+    Workspace* insertDynamicWorkspace(size_t index, const std::string& namespaceId);
     bool moveActiveWorkspace(int direction);
     void reconcileInventory();
     void refreshLayouts();
@@ -301,12 +327,19 @@ namespace umbriel {
     [[nodiscard]] bool animatesOn(const Output* output) const override { return m_output == output; }
 
   private:
-    std::unique_ptr<Workspace> createConfiguredWorkspace(ResolvedWorkspace workspace, size_t index);
+    std::unique_ptr<Workspace>
+    createConfiguredWorkspace(ResolvedWorkspace workspace, size_t index, std::string namespaceId);
+    // Namespace ids in global inventory order, backing the namespace.h helpers.
+    [[nodiscard]] std::vector<std::string_view> namespaceList() const;
     std::string nextWorkspaceId();
-    Workspace* appendDynamicWorkspace();
-    Workspace* prependDynamicWorkspace();
+    Workspace* appendDynamicWorkspace(const std::string& namespaceId);
+    Workspace* prependDynamicWorkspace(const std::string& namespaceId);
     void reconcileDynamicNames(const std::vector<ResolvedWorkspace>& resolved);
     void refreshDynamicWorkspaceMetadata();
+    // Maintain floor, sentinels, and pruning for one namespace run. The vector
+    // stays in global inventory order; only members of `ns` are created or
+    // removed here.
+    void reconcileDynamicNamespace(const std::string& ns, bool emptyAbove, size_t minimum);
 
     struct Slide {
       Workspace* base = nullptr;
@@ -323,6 +356,7 @@ namespace umbriel {
     Workspace* m_previous = nullptr;
     bool m_dynamic = false;
     size_t m_omittedConfiguredNames = 0;
+    std::string m_activeNamespace;
     WorkspaceAxis m_workspaceAxis = WorkspaceAxis::Vertical;
     uint32_t m_nextHandleSerial = 1;
     std::vector<std::unique_ptr<Workspace>> m_workspaces;

@@ -245,6 +245,27 @@ namespace {
           return name + ": skip-confirmation";
         }
         return name;
+      case umbriel::ActionArgKind::Namespace:
+        if (const auto* ns = umbriel::payloadIf<umbriel::NamespaceArg>(bind)) {
+          std::string label = name;
+          if (!ns->name.empty() || !ns->output.empty()) {
+            label += ": " + ns->name;
+            if (!ns->output.empty()) {
+              label += "/" + ns->output;
+            }
+          }
+          return label;
+        }
+        return name;
+      case umbriel::ActionArgKind::WorkspaceNamespace:
+        if (const auto* arg = umbriel::payloadIf<umbriel::WorkspaceNamespaceArg>(bind)) {
+          std::string label = name + ": " + workspaceReferenceLabel(arg->workspace.reference);
+          if (!arg->workspace.output.empty()) {
+            label += "/" + arg->workspace.output;
+          }
+          return label + "=" + arg->namespaceId;
+        }
+        return name;
       }
       return name;
     }
@@ -375,6 +396,8 @@ namespace {
     case A::WorkspaceMoveDown:
     case A::WorkspaceMoveUp:
     case A::WorkspaceSetLayout:
+    case A::NamespaceSwitch:
+    case A::WorkspaceSetNamespace:
     case A::WorkspaceMoveToOutputLeft:
     case A::WorkspaceMoveToOutputRight:
     case A::WorkspaceMoveToOutputUp:

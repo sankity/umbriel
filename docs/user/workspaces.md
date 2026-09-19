@@ -191,6 +191,31 @@ monitor's center so subsequent actions continue there. Window and column moves
 do the same by default. With `input.cursor.follows_focus` enabled, they warp to
 the moved focused window's visible center instead.
 
+## Workspace namespaces
+
+Each workspace belongs to one namespace: an opaque string the shell assigns,
+or the empty default namespace. Each output remembers one active namespace,
+starting empty. While a non-empty namespace is active, positions, `next`,
+`previous`, and the other navigation actions operate only on that namespace's
+workspaces; the global workspace ids stay stable and nothing is isolated
+(processes, windows, and scratchpads are unaffected).
+
+```sh
+umbriel msg namespace-switch:coding            # work only with coding workspaces here
+umbriel msg workspace-set-namespace:2=coding   # move position 2 into coding
+umbriel msg namespace-switch                  # back to the default namespace
+```
+
+Switching keeps the active workspace when it stays visible and otherwise
+selects the first workspace in the new namespace. A fresh namespace starts
+from the dynamic floor and gains its own trailing empty workspace through the
+ordinary dynamic lifecycle. Moving a workspace changes only its membership:
+id, name, and index are preserved, and the group falls back to the first
+visible workspace when the move strands the active one outside the active
+namespace. Names resolve across namespaces for the move itself, while numeric
+positions always count inside the active namespace. See [Actions](actions.md)
+and [IPC](ipc.md) for the exact argument forms and event payloads.
+
 ## Inspect workspace state
 
 Run `umbriel workspaces` to list every workspace with its output and effective

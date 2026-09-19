@@ -44,6 +44,7 @@ unit_tests = [
   ['action-registry', ['unit/action_registry.cpp'], [umbriel_core_dep]],
   ['ipc-commands', ['unit/ipc_commands.cpp'], [umbriel_core_dep]],
   ['config-resolve', ['unit/config_resolve.cpp'], []],
+  ['workspace-namespace', ['unit/workspace_namespace.cpp'], []],
   # Reads docs/user/actions.md from the source tree: the doc's tables are generated from the same spec strings the CLI
   # prints, so the compiled table and the page cannot drift apart unnoticed.
   [

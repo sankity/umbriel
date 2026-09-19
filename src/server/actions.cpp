@@ -14,6 +14,7 @@
 #include "server/server.h"
 #include "view/view.h"
 #include "wlr.h"
+#include "workspace/namespace.h"
 #include "workspace/scratchpad.h"
 #include "workspace/workspace.h"
 
@@ -84,10 +85,14 @@ namespace umbriel {
       return needsQuotes ? "\"" + std::string(name) + "\"" : std::string(name);
     }
 
-    // Resolve a typed workspace reference against the current output layout. Indices stay on the preferred output;
-    // names resolve globally, using that output only to disambiguate duplicates. An output qualifier confines either
-    // kind to exactly one group.
-    std::expected<Workspace*, std::string> resolveWorkspaceSelector(Server& server, const Keybind& bind) {
+    // Resolve a typed workspace reference against the current output layout. Indices are positions inside the group's
+    // active namespace and stay on the preferred output; names resolve globally, using that output only to
+    // disambiguate duplicates. An output qualifier confines either kind to exactly one group. A target hidden by the
+    // relevant group's active namespace is rejected rather than leaking across namespaces, unless `allowHidden` is
+    // set for explicit mutations (workspace-set-namespace): names then stay globally addressable, while numeric
+    // positions remain namespace-relative display positions and can never address a hidden workspace.
+    std::expected<Workspace*, std::string>
+    resolveWorkspaceSelector(Server& server, const Keybind& bind, bool allowHidden = false) {
       const auto* selector = payloadIf<WorkspaceArg>(bind);
       if (selector == nullptr) {
         return std::unexpected(std::string("action carries no workspace selector"));
@@ -106,7 +111,7 @@ namespace umbriel {
         if (const auto* index = std::get_if<WorkspaceIndex>(&selector->reference)) {
           reference = std::to_string(index->value);
           if (index->value > 0) {
-            target = group->workspaceAtClamped(index->value - 1);
+            target = group->workspaceAtInNamespaceClamped(index->value - 1);
           }
         } else if (const auto* name = std::get_if<WorkspaceName>(&selector->reference)) {
           reference = name->value;
@@ -115,6 +120,11 @@ namespace umbriel {
         if (target == nullptr) {
           return std::unexpected("unknown workspace on output " + selector->output + ": " + reference);
         }
+        if (!allowHidden && !namespaceVisible(target->namespaceId(), group->activeNamespace())) {
+          return std::unexpected(
+              "workspace " + reference + " on output " + selector->output + " is not in the active namespace"
+          );
+        }
         return target;
       }
 
@@ -122,9 +132,10 @@ namespace umbriel {
       WorkspaceGroup* preferredGroup = preferred != nullptr ? preferred->workspaceGroup() : nullptr;
 
       if (const auto* index = std::get_if<WorkspaceIndex>(&selector->reference)) {
-        Workspace* target = index->value > 0 && preferredGroup != nullptr
-            ? preferredGroup->workspaceAtClamped(index->value - 1)
-            : nullptr;
+        Workspace* target = nullptr;
+        if (index->value > 0 && preferredGroup != nullptr) {
+          target = preferredGroup->workspaceAtInNamespaceClamped(index->value - 1);
+        }
         if (target == nullptr) {
           return std::unexpected("unknown workspace position: " + std::to_string(index->value));
         }
@@ -161,7 +172,13 @@ namespace umbriel {
           const std::string token = workspaceNameToken(name->value);
           return std::unexpected("ambiguous workspace: " + name->value + " (qualify it as " + token + "/<output>)");
         }
+        if (!allowHidden && !namespaceVisible(preferredMatch->namespaceId(), preferredGroup->activeNamespace())) {
+          return std::unexpected("workspace " + name->value + " is not in the active namespace");
+        }
         return preferredMatch;
+      }
+      if (!allowHidden && !namespaceVisible(target->namespaceId(), target->group()->activeNamespace())) {
+        return std::unexpected("workspace " + name->value + " is not in the active namespace");
       }
       return target;
     }
@@ -693,17 +710,15 @@ namespace umbriel {
         }
       }
       // No layout window in this direction. A detached scratchpad has no
-      // layout neighbor, so retain the composite action's workspace fallback.
+      // layout neighbor, so retain the composite action's workspace fallback,
+      // scoped to the active namespace.
       Workspace* workspace = activeWorkspace(server);
       WorkspaceGroup* group = workspace != nullptr ? workspace->group() : nullptr;
       if (group == nullptr) {
         return true;
       }
-      const size_t index = workspace->index();
-      if (Direction < 0 && index == 0) {
-        return true;
-      }
-      Workspace* targetWorkspace = group->workspaceAt(index + static_cast<size_t>(Direction));
+      Workspace* targetWorkspace =
+          Direction < 0 ? group->prevWorkspaceInNamespace(workspace) : group->nextWorkspaceInNamespace(workspace);
       if (targetWorkspace != nullptr && targetWorkspace != group->active()) {
         group->select(targetWorkspace);
         Workspace* selected = group->active();
@@ -795,11 +810,8 @@ namespace umbriel {
             return true;
           }
           WorkspaceGroup* group = source->group();
-          const size_t index = source->index();
-          if (Direction < 0 && index == 0) {
-            return true;
-          }
-          Workspace* target = group->workspaceAt(index + static_cast<size_t>(Direction));
+          Workspace* target =
+              Direction < 0 ? group->prevWorkspaceInNamespace(source) : group->nextWorkspaceInNamespace(source);
           if (target == nullptr || target == source) {
             return true;
           }
@@ -1105,7 +1117,10 @@ namespace umbriel {
         return true;
       }
       Workspace* target = group->previous();
-      if (target == nullptr || target == group->active()) {
+      // focus-last never leaves the active namespace.
+      if (target == nullptr
+          || target == group->active()
+          || !namespaceVisible(target->namespaceId(), group->activeNamespace())) {
         return true;
       }
       group->select(target);
@@ -1185,11 +1200,10 @@ namespace umbriel {
       if (group == nullptr) {
         return true;
       }
-      const size_t index = group->active()->index();
-      if (Direction < 0 && index == 0) {
-        return true; // no wrap-around; silent no-op at the first workspace
-      }
-      Workspace* target = group->workspaceAt(index + static_cast<size_t>(Direction));
+      // Adjacent means adjacent in the active namespace: no wrap-around and a
+      // silent no-op at the namespace edge.
+      Workspace* target = Direction < 0 ? group->prevWorkspaceInNamespace(group->active())
+                                        : group->nextWorkspaceInNamespace(group->active());
       if (target == nullptr || target == group->active()) {
         return true;
       }
@@ -1204,11 +1218,8 @@ namespace umbriel {
         return true;
       }
       WorkspaceGroup* group = workspace->group();
-      const size_t index = workspace->index();
-      if (Direction < 0 && index == 0) {
-        return true;
-      }
-      Workspace* target = group->workspaceAt(index + static_cast<size_t>(Direction));
+      Workspace* target =
+          Direction < 0 ? group->prevWorkspaceInNamespace(workspace) : group->nextWorkspaceInNamespace(workspace);
       if (target == nullptr || target == workspace) {
         return true;
       }
@@ -1225,11 +1236,8 @@ namespace umbriel {
         return true;
       }
       WorkspaceGroup* group = source->group();
-      const size_t index = source->index();
-      if (Direction < 0 && index == 0) {
-        return true;
-      }
-      Workspace* target = group->workspaceAt(index + static_cast<size_t>(Direction));
+      Workspace* target =
+          Direction < 0 ? group->prevWorkspaceInNamespace(source) : group->nextWorkspaceInNamespace(source);
       if (target == nullptr || target == source) {
         return true;
       }
@@ -1265,6 +1273,97 @@ namespace umbriel {
       // The layout behind an interactive tiled resize is being replaced; drop
       // the stale session, same as the config-reload layout swap.
       server.cursor()->cancelStaleTiledResize();
+      return true;
+    }
+
+    bool actionNamespaceSwitch(Server& server, const Keybind& bind, std::string* error) {
+      const auto* arg = payloadIf<NamespaceArg>(bind);
+      if (arg == nullptr) {
+        return false;
+      }
+      Output* output = nullptr;
+      if (!arg->output.empty()) {
+        output = server.outputFromName(arg->output);
+        if (output == nullptr) {
+          return reject(error, "unknown output: " + arg->output);
+        }
+      } else {
+        output = server.outputFromWlr(server.preferredOutput());
+        if (output == nullptr) {
+          return reject(error, "no outputs");
+        }
+      }
+      WorkspaceGroup* group = output->workspaceGroup();
+      if (group == nullptr) {
+        return reject(error, "output has no workspace group: " + std::string(output->wlr()->name));
+      }
+      // Idempotent: switching to the current namespace changes nothing and
+      // emits no events.
+      if (group->activeNamespace() == arg->name) {
+        return true;
+      }
+      // Settle any in-flight switch first, exactly like activate() does: a
+      // running slide would defer the reconcile below, leaving the fallback
+      // with no visible workspace to select.
+      group->slideFinish();
+      group->setActiveNamespace(arg->name);
+      // Preserve the active workspace when it stays visible; otherwise select
+      // the first workspace in the new namespace so focus never strands on a
+      // hidden workspace. Remembering one workspace per namespace is shell
+      // policy (a later namespace-switch re-selects); the compositor only
+      // guarantees a valid visible selection.
+      Workspace* active = group->active();
+      if (active == nullptr || !namespaceVisible(active->namespaceId(), group->activeNamespace())) {
+        if (Workspace* first = group->workspaceAtInNamespace(0)) {
+          group->select(first);
+        }
+      }
+      if (output != server.outputFromWlr(server.preferredOutput())) {
+        warpToOutputCenter(server, *output);
+      }
+      return true;
+    }
+
+    bool actionWorkspaceSetNamespace(Server& server, const Keybind& bind, std::string* error) {
+      const auto* arg = payloadIf<WorkspaceNamespaceArg>(bind);
+      if (arg == nullptr) {
+        return false;
+      }
+      // Explicit mutation: the source resolves without the navigation
+      // visibility veto, so workspaces in other namespaces are addressable by
+      // name. Numeric positions stay namespace-relative.
+      Keybind selectorBind = bind;
+      selectorBind.payload = arg->workspace;
+      const std::expected<Workspace*, std::string> target = resolveWorkspaceSelector(server, selectorBind, true);
+      if (!target.has_value()) {
+        return reject(error, target.error());
+      }
+      Workspace* workspace = *target;
+      WorkspaceGroup* group = workspace->group();
+      if (group == nullptr) {
+        return reject(error, "workspace has no group");
+      }
+      // Idempotent: same membership changes nothing and emits no events.
+      if (workspace->namespaceId() == arg->namespaceId) {
+        return true;
+      }
+      // Only membership changes: id, name, and index are untouched, so the
+      // workspace cannot disappear from any operation. The following
+      // reconcile maintains the namespaces' sentinels and floors. Settle any
+      // in-flight switch first so the reconcile runs synchronously and the
+      // fallback below always sees the post-reconcile inventory.
+      group->slideFinish();
+      workspace->setNamespaceId(arg->namespaceId);
+      group->reconcileDynamic();
+      // A move that strands the active workspace outside the active namespace
+      // falls back to the first visible workspace (freshly materialized by
+      // the reconcile above when the old namespace needs one).
+      Workspace* active = group->active();
+      if (active == nullptr || !namespaceVisible(active->namespaceId(), group->activeNamespace())) {
+        if (Workspace* first = group->workspaceAtInNamespace(0)) {
+          group->select(first);
+        }
+      }
       return true;
     }
 
@@ -1814,6 +1913,8 @@ namespace umbriel {
         &actionCycleHeight<-1>,
         &actionWindowFocusLast,
         &actionWorkspaceFocusLast,
+        &actionNamespaceSwitch,
+        &actionWorkspaceSetNamespace,
     };
 
     consteval bool everyActionHasHandler() {

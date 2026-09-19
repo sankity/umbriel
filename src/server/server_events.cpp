@@ -1881,6 +1881,7 @@ namespace umbriel {
             .workspaceName = sourceGroup->active()->name(),
             .workspaceIndex = sourceGroup->active()->index(),
             .workspaceNamed = sourceGroup->active()->named(),
+            .workspaceNamespace = sourceGroup->active()->namespaceId(),
         });
       }
     }
@@ -1910,6 +1911,7 @@ namespace umbriel {
             .workspaceName = workspace->name(),
             .workspaceIndex = workspace->index(),
             .workspaceNamed = workspace->named(),
+            .workspaceNamespace = workspace->namespaceId(),
             .layoutSnapshot = nullptr,
             .layoutMember = 0,
             .ownsNamedScrollingColumnExtent = view->m_ownsNamedScrollingColumnExtent,
@@ -2085,16 +2087,19 @@ namespace umbriel {
         if (targetGroup->dynamic()) {
           // A recreated dynamic group starts with its configured names and
           // sentinel. Materialize the saved anonymous position before
-          // restoring its surviving windows.
+          // restoring its surviving windows, stamping the remembered home
+          // namespace: every inserted workspace is newly created, so no
+          // existing membership is relabeled.
           while (targetGroup->workspaceCount() <= groupHome.workspaceIndex) {
-            if (targetGroup->insertDynamicWorkspace(targetGroup->workspaceCount()) == nullptr) {
+            if (targetGroup->insertDynamicWorkspace(targetGroup->workspaceCount(), groupHome.workspaceNamespace)
+                == nullptr) {
               break;
             }
           }
         }
         workspace = targetGroup->workspaceAt(groupHome.workspaceIndex);
         if (targetGroup->dynamic() && workspace != nullptr && workspace->named()) {
-          workspace = targetGroup->insertDynamicWorkspace(groupHome.workspaceIndex);
+          workspace = targetGroup->insertDynamicWorkspace(groupHome.workspaceIndex, groupHome.workspaceNamespace);
         }
       }
       const bool selectorMatched = workspace != nullptr;
@@ -2347,13 +2352,13 @@ namespace umbriel {
       Workspace* workspace = selection->workspaceNamed ? group->workspaceNamed(selection->workspaceName) : nullptr;
       if (!selection->workspaceNamed && group->dynamic()) {
         while (group->workspaceCount() <= selection->workspaceIndex) {
-          if (group->insertDynamicWorkspace(group->workspaceCount()) == nullptr) {
+          if (group->insertDynamicWorkspace(group->workspaceCount(), selection->workspaceNamespace) == nullptr) {
             break;
           }
         }
         workspace = group->workspaceAt(selection->workspaceIndex);
         if (workspace != nullptr && workspace->named()) {
-          Workspace* inserted = group->insertDynamicWorkspace(selection->workspaceIndex);
+          Workspace* inserted = group->insertDynamicWorkspace(selection->workspaceIndex, selection->workspaceNamespace);
           workspace = inserted != nullptr ? inserted : group->active();
         }
       }

@@ -16,6 +16,7 @@
 #include "view/registry.h"
 #include "view/view.h"
 #include "view/xdg_size.h"
+#include "workspace/namespace.h"
 // clang-format off
 #include <algorithm>
 #include <cmath>
@@ -1541,6 +1542,16 @@ namespace umbriel {
     }
   }
 
+  void Workspace::setNamespaceId(std::string namespaceId) {
+    if (m_namespaceId == namespaceId) {
+      return;
+    }
+    m_namespaceId = std::move(namespaceId);
+    if (m_group != nullptr) {
+      m_group->server()->scheduleIpcWorkspacesEvent();
+    }
+  }
+
   void Workspace::applyLayoutConfig(ResolvedLayoutConfig layoutConfig) {
     const bool centerFocusedChanged = m_layoutConfig.scrolling.centerFocused != layoutConfig.scrolling.centerFocused;
     const bool strutsChanged = m_layoutConfig.struts != layoutConfig.struts;
@@ -1602,7 +1613,7 @@ namespace umbriel {
     const size_t count = resolved.workspaces.size();
     m_workspaces.reserve(count);
     for (size_t i = 0; i < count; ++i) {
-      m_workspaces.push_back(createConfiguredWorkspace(std::move(resolved.workspaces[i]), i));
+      m_workspaces.push_back(createConfiguredWorkspace(std::move(resolved.workspaces[i]), i, m_activeNamespace));
     }
 
     activate(m_workspaces.front().get());
@@ -1634,34 +1645,41 @@ namespace umbriel {
     return std::format("{}:{}", connector.empty() ? "output" : connector, m_nextHandleSerial++);
   }
 
-  std::unique_ptr<Workspace> WorkspaceGroup::createConfiguredWorkspace(ResolvedWorkspace workspace, size_t index) {
+  std::unique_ptr<Workspace>
+  WorkspaceGroup::createConfiguredWorkspace(ResolvedWorkspace workspace, size_t index, std::string namespaceId) {
     wlr_ext_workspace_manager_v1* manager = m_server->workspaceManager();
     std::string id = nextWorkspaceId();
     wlr_ext_workspace_handle_v1* handle = wlr_ext_workspace_handle_v1_create(manager, id.c_str(), kWorkspaceCaps);
     // Group construction and the dynamic append/prepend/insert paths all funnel through here, and the payload is read
     // at idle time, after the caller has pushed the workspace into the list.
     m_server->scheduleIpcWorkspacesEvent();
-    return std::make_unique<Workspace>(
+    auto result = std::make_unique<Workspace>(
         *this, handle, std::move(id), std::move(workspace.name), index, workspace.named, std::move(workspace.layout)
     );
+    // Every workspace is born into an explicit namespace. Callers pass the
+    // group's active namespace for dynamic inventory and configured
+    // materialization alike; the default namespace ("") preserves existing
+    // behavior. Membership never changes implicitly afterwards.
+    result->setNamespaceId(std::move(namespaceId));
+    return result;
   }
 
-  Workspace* WorkspaceGroup::appendDynamicWorkspace() {
+  Workspace* WorkspaceGroup::appendDynamicWorkspace(const std::string& namespaceId) {
     const size_t index = m_workspaces.size();
     std::string name = std::to_string(index + 1);
     const OutputIdentity identity = m_output->identity();
     ResolvedLayoutConfig layout = resolveUnnamedWorkspaceLayout(config(), identity, index);
-    auto workspace = createConfiguredWorkspace({std::move(name), false, std::move(layout)}, index);
+    auto workspace = createConfiguredWorkspace({std::move(name), false, std::move(layout)}, index, namespaceId);
     Workspace* result = workspace.get();
     m_workspaces.push_back(std::move(workspace));
     return result;
   }
 
-  Workspace* WorkspaceGroup::prependDynamicWorkspace() {
+  Workspace* WorkspaceGroup::prependDynamicWorkspace(const std::string& namespaceId) {
     const std::string name = "1";
     const OutputIdentity identity = m_output->identity();
     ResolvedLayoutConfig layout = resolveUnnamedWorkspaceLayout(config(), identity, 0);
-    auto workspace = createConfiguredWorkspace({name, false, std::move(layout)}, 0);
+    auto workspace = createConfiguredWorkspace({name, false, std::move(layout)}, 0, namespaceId);
     Workspace* result = workspace.get();
     m_workspaces.insert(m_workspaces.begin(), std::move(workspace));
     return result;
@@ -1692,7 +1710,7 @@ namespace umbriel {
     }
   }
 
-  Workspace* WorkspaceGroup::insertDynamicWorkspace(size_t index) {
+  Workspace* WorkspaceGroup::insertDynamicWorkspace(size_t index, const std::string& namespaceId) {
     if (!m_dynamic || m_output == nullptr || m_output->wlr() == nullptr || m_workspaces.size() >= kMaxWorkspaces) {
       return nullptr;
     }
@@ -1700,7 +1718,7 @@ namespace umbriel {
     const std::string name = std::to_string(index + 1);
     const OutputIdentity identity = m_output->identity();
     ResolvedLayoutConfig layout = resolveUnnamedWorkspaceLayout(config(), identity, index);
-    auto workspace = createConfiguredWorkspace({name, false, std::move(layout)}, index);
+    auto workspace = createConfiguredWorkspace({name, false, std::move(layout)}, index, namespaceId);
     Workspace* result = workspace.get();
     m_workspaces.insert(m_workspaces.begin() + static_cast<std::ptrdiff_t>(index), std::move(workspace));
     refreshDynamicWorkspaceMetadata();
@@ -1711,37 +1729,51 @@ namespace umbriel {
   }
 
   bool WorkspaceGroup::moveActiveWorkspace(int direction) {
-    if (m_active == nullptr || m_workspaces.size() < 2 || direction == 0 || m_output == nullptr) {
+    if (m_active == nullptr || direction == 0 || m_output == nullptr) {
       return false;
     }
-    const size_t index = m_active->index();
-    const auto target = static_cast<std::ptrdiff_t>(index) + direction;
-    if (target < 0 || target >= static_cast<std::ptrdiff_t>(m_workspaces.size())) {
+    // Reorder within the active namespace only: the neighbor is the nearest
+    // visible workspace in `direction`, which may sit across hidden members of
+    // other namespaces. Swapping the two vector slots keeps every other
+    // workspace (including hidden ones) at its relative position.
+    Workspace* neighbor = direction > 0 ? nextWorkspaceInNamespace(m_active) : prevWorkspaceInNamespace(m_active);
+    if (neighbor == nullptr) {
+      return false;
+    }
+    size_t index = m_workspaces.size();
+    size_t target = m_workspaces.size();
+    for (size_t slot = 0; slot < m_workspaces.size(); ++slot) {
+      if (m_workspaces[slot].get() == m_active) {
+        index = slot;
+      } else if (m_workspaces[slot].get() == neighbor) {
+        target = slot;
+      }
+    }
+    if (index >= m_workspaces.size() || target >= m_workspaces.size()) {
       return false;
     }
     if (m_dynamic) {
       if (direction > 0) {
-        const bool targetIsTrailingEmpty = static_cast<size_t>(target) == m_workspaces.size() - 1
-            && !m_workspaces[static_cast<size_t>(target)]->named()
-            && !m_workspaces[static_cast<size_t>(target)]->hasViews();
+        const bool targetIsTrailingEmpty =
+            target == m_workspaces.size() - 1 && !neighbor->named() && !neighbor->hasViews();
         if (targetIsTrailingEmpty) {
           return false;
         }
       } else if (config().workspaces.emptyAbove) {
-        const bool targetIsLeadingEmpty = target == 0 && !m_workspaces[0]->named() && !m_workspaces[0]->hasViews();
+        const bool targetIsLeadingEmpty = target == 0 && !neighbor->named() && !neighbor->hasViews();
         if (targetIsLeadingEmpty) {
           return false;
         }
       }
     }
     slideFinish();
-    std::swap(m_workspaces[index], m_workspaces[static_cast<size_t>(target)]);
+    std::swap(m_workspaces[index], m_workspaces[target]);
     if (m_dynamic) {
       reconcileDynamic();
       return true;
     }
     const OutputIdentity identity = m_output->identity();
-    for (const size_t slot : {index, static_cast<size_t>(target)}) {
+    for (const size_t slot : {index, target}) {
       Workspace* moved = m_workspaces[slot].get();
       const bool named = moved->named();
       const std::string name = named ? moved->name() : std::to_string(slot + 1);
@@ -1832,7 +1864,7 @@ namespace umbriel {
         index = 1;
       }
       ResolvedLayoutConfig layout = resolveWorkspaceLayout(config(), m_output->identity(), entry, index);
-      auto workspace = createConfiguredWorkspace({entry, true, std::move(layout)}, index);
+      auto workspace = createConfiguredWorkspace({entry, true, std::move(layout)}, index, m_activeNamespace);
       m_workspaces.insert(m_workspaces.begin() + static_cast<std::ptrdiff_t>(index), std::move(workspace));
       claimed.push_back(entry);
     }
@@ -1874,7 +1906,7 @@ namespace umbriel {
       if (next[i] != nullptr) {
         next[i]->rename(resolved[i].name, i, resolved[i].named);
       } else {
-        next[i] = createConfiguredWorkspace(std::move(resolved[i]), i);
+        next[i] = createConfiguredWorkspace(std::move(resolved[i]), i, m_activeNamespace);
       }
     }
 
@@ -1989,77 +2021,103 @@ namespace umbriel {
     }
     reconcileDynamicNames(resolved.workspaces);
 
-    // Dynamic groups keep their active empty workspace until the user leaves it. It can serve as the trailing sentinel
-    // when every workspace after it is another anonymous empty, but not when a named or occupied workspace follows it.
+    // Maintain every namespace present in the group plus the active one, so a
+    // fresh active namespace materializes its floor and sentinel. The vector
+    // stays in global inventory order; each pass only creates or removes
+    // members of its own namespace, so interleaved members of other
+    // namespaces are preserved untouched. With a single namespace (notably
+    // the default "") this reduces exactly to the historical global pass.
     const bool emptyAbove = config().workspaces.emptyAbove;
     const size_t minimum = resolveDynamicWorkspaceMinimum(config(), identity);
-    Workspace* frontKeeper = nullptr;
-    if (emptyAbove && !m_workspaces.empty() && !m_workspaces.front()->named() && !m_workspaces.front()->hasViews()) {
-      frontKeeper = m_workspaces.front().get();
-    }
-
-    // The optional leading empty and the trailing empty are distinct inventory entries, including before the first
-    // view maps. A leading empty therefore cannot also serve as the trailing keeper.
-    Workspace* activeKeeper = nullptr;
-    if (m_active != nullptr && !m_active->named() && !m_active->hasViews()) {
-      activeKeeper = m_active;
-    }
-    Workspace* backKeeper = nullptr;
-    if (activeKeeper != nullptr && activeKeeper != frontKeeper) {
-      const auto active =
-          std::ranges::find_if(m_workspaces, [&](const auto& workspace) { return workspace.get() == activeKeeper; });
-      const bool substantiveWorkspaceFollows = active != m_workspaces.end()
-          && std::ranges::any_of(active + 1, m_workspaces.end(),
-                                 [](const auto& workspace) { return workspace->named() || workspace->hasViews(); });
-      if (!substantiveWorkspaceFollows) {
-        backKeeper = activeKeeper;
+    std::vector<std::string> namespaces;
+    for (const auto& entry : m_workspaces) {
+      if (std::ranges::find(namespaces, entry->namespaceId()) == namespaces.end()) {
+        namespaces.push_back(entry->namespaceId());
       }
     }
-    if (backKeeper == nullptr
-        && !m_workspaces.empty()
-        && !m_workspaces.back()->named()
-        && !m_workspaces.back()->hasViews()
-        && m_workspaces.back().get() != frontKeeper) {
-      backKeeper = m_workspaces.back().get();
+    if (std::ranges::find(namespaces, m_activeNamespace) == namespaces.end()) {
+      namespaces.push_back(m_activeNamespace);
     }
-
-    for (size_t index = m_workspaces.size(); index-- > 0;) {
-      // min_workspaces is a floor on the count, not on a position. Pruning runs from the end, so it stops as soon as
-      // the group would shrink past the floor and the surviving empties are the lowest-numbered ones.
-      if (m_workspaces.size() <= minimum) {
-        break;
-      }
-      Workspace* workspace = m_workspaces[index].get();
-      if (!workspace->named()
-          && !workspace->hasViews()
-          && workspace != activeKeeper
-          && workspace != backKeeper
-          && workspace != frontKeeper) {
-        if (m_previous == workspace) {
-          m_previous = nullptr;
-        }
-        m_workspaces.erase(m_workspaces.begin() + static_cast<std::ptrdiff_t>(index));
-        m_server->scheduleIpcWorkspacesEvent();
-      }
-    }
-    // Filling the floor appends empty workspaces, so the last of them is the trailing empty this group needs.
-    while (m_workspaces.size() < minimum) {
-      backKeeper = appendDynamicWorkspace();
-    }
-    if ((m_workspaces.empty()
-         || m_workspaces.back()->named()
-         || m_workspaces.back()->hasViews()
-         || m_workspaces.back().get() == frontKeeper)
-        && m_workspaces.size() < kMaxWorkspaces) {
-      appendDynamicWorkspace();
-    }
-    if (emptyAbove && frontKeeper == nullptr && m_workspaces.size() < kMaxWorkspaces) {
-      prependDynamicWorkspace();
+    for (const std::string& ns : namespaces) {
+      reconcileDynamicNamespace(ns, emptyAbove, minimum);
     }
 
     refreshDynamicWorkspaceMetadata();
     if (Overview* overview = m_server->overview(); overview != nullptr && overview->active()) {
       overview->onWorkspaceInventoryChanged(this);
+    }
+  }
+
+  void WorkspaceGroup::reconcileDynamicNamespace(const std::string& ns, bool emptyAbove, size_t minimum) {
+    // The namespace run: global slots in inventory order plus keeper inputs.
+    // Indices below are run-relative; erasures map back to vector slots.
+    std::vector<size_t> run;
+    std::vector<NamespaceInventoryMember> states;
+    for (size_t index = 0; index < m_workspaces.size(); ++index) {
+      if (m_workspaces[index]->namespaceId() != ns) {
+        continue;
+      }
+      run.push_back(index);
+      states.push_back({
+          .named = m_workspaces[index]->named(),
+          .occupied = m_workspaces[index]->hasViews(),
+          .isActive = m_workspaces[index].get() == m_active,
+      });
+    }
+
+    std::vector<size_t> doomed;
+    for (size_t victim : prunableIndicesInNamespace(states, emptyAbove, minimum)) {
+      doomed.push_back(run[victim]);
+    }
+    // prunableIndicesInNamespace returns descending order, so erasing
+    // front-to-back never disturbs pending slots.
+    for (size_t slot : doomed) {
+      if (m_previous == m_workspaces[slot].get()) {
+        m_previous = nullptr;
+      }
+      m_workspaces.erase(m_workspaces.begin() + static_cast<std::ptrdiff_t>(slot));
+      m_server->scheduleIpcWorkspacesEvent();
+    }
+
+    auto namespaceListAfter = [&] {
+      std::vector<std::string_view> list;
+      list.reserve(m_workspaces.size());
+      for (const auto& entry : m_workspaces) {
+        list.push_back(entry->namespaceId());
+      }
+      return list;
+    };
+    const auto countIn = [&] { return countInNamespace(namespaceListAfter(), ns); };
+    const auto lastOf = [&] -> Workspace* {
+      const size_t count = countIn();
+      if (count == 0) {
+        return nullptr;
+      }
+      const std::optional<size_t> global = globalIndexAt(namespaceListAfter(), ns, count - 1);
+      return global.has_value() ? m_workspaces[*global].get() : nullptr;
+    };
+    const auto firstOf = [&] -> Workspace* {
+      const std::optional<size_t> global = globalIndexAt(namespaceListAfter(), ns, 0);
+      return global.has_value() ? m_workspaces[*global].get() : nullptr;
+    };
+
+    // Filling the floor appends empty workspaces, so the last of them is the trailing empty this namespace needs.
+    // The global cap bounds multi-namespace totals; a single namespace never reaches it (minimum <= 64).
+    while (countIn() < minimum && m_workspaces.size() < kMaxWorkspaces) {
+      appendDynamicWorkspace(ns);
+    }
+    Workspace* frontKeeper = nullptr;
+    if (Workspace* first = firstOf(); emptyAbove && first != nullptr && !first->named() && !first->hasViews()) {
+      frontKeeper = first;
+    }
+    // The trailing empty is per namespace: another namespace's sentinel must
+    // never satisfy this one.
+    if (Workspace* last = lastOf(); (last == nullptr || last->named() || last->hasViews() || last == frontKeeper)
+        && m_workspaces.size() < kMaxWorkspaces) {
+      appendDynamicWorkspace(ns);
+    }
+    if (emptyAbove && frontKeeper == nullptr && m_workspaces.size() < kMaxWorkspaces) {
+      prependDynamicWorkspace(ns);
     }
   }
 
@@ -2096,6 +2154,85 @@ namespace umbriel {
     return nullptr;
   }
 
+  void WorkspaceGroup::setActiveNamespace(std::string namespaceId) {
+    if (m_activeNamespace == namespaceId) {
+      return;
+    }
+    m_activeNamespace = std::move(namespaceId);
+    m_server->scheduleIpcWorkspacesEvent();
+    // A fresh namespace materializes its floor and sentinel through the
+    // ordinary dynamic lifecycle; static groups are unaffected (early return
+    // inside reconcileDynamic).
+    reconcileDynamic();
+  }
+
+  std::vector<std::string_view> WorkspaceGroup::namespaceList() const {
+    std::vector<std::string_view> namespaces;
+    namespaces.reserve(m_workspaces.size());
+    for (const auto& entry : m_workspaces) {
+      namespaces.push_back(entry->namespaceId());
+    }
+    return namespaces;
+  }
+
+  size_t WorkspaceGroup::workspaceCountInNamespace() const {
+    return countInNamespace(namespaceList(), m_activeNamespace);
+  }
+
+  Workspace* WorkspaceGroup::workspaceAtInNamespace(size_t position) const {
+    const std::optional<size_t> global = globalIndexAt(namespaceList(), m_activeNamespace, position);
+    return global.has_value() ? m_workspaces[*global].get() : nullptr;
+  }
+
+  Workspace* WorkspaceGroup::workspaceAtInNamespaceClamped(size_t position) const {
+    const std::vector<std::string_view> namespaces = namespaceList();
+    const std::optional<size_t> clamped =
+        clampPositionInNamespace(countInNamespace(namespaces, m_activeNamespace), position, m_dynamic);
+    if (!clamped.has_value()) {
+      return nullptr;
+    }
+    const std::optional<size_t> global = globalIndexAt(namespaces, m_activeNamespace, *clamped);
+    return global.has_value() ? m_workspaces[*global].get() : nullptr;
+  }
+
+  std::optional<size_t> WorkspaceGroup::indexInNamespace(const Workspace* workspace) const {
+    if (workspace == nullptr) {
+      return std::nullopt;
+    }
+    for (size_t index = 0; index < m_workspaces.size(); ++index) {
+      if (m_workspaces[index].get() == workspace) {
+        return umbriel::indexInNamespace(namespaceList(), m_activeNamespace, index);
+      }
+    }
+    return std::nullopt;
+  }
+
+  Workspace* WorkspaceGroup::nextWorkspaceInNamespace(const Workspace* workspace) const {
+    if (workspace == nullptr || !namespaceVisible(workspace->namespaceId(), m_activeNamespace)) {
+      return nullptr;
+    }
+    for (size_t index = 0; index < m_workspaces.size(); ++index) {
+      if (m_workspaces[index].get() == workspace) {
+        const std::optional<size_t> next = nextInNamespace(namespaceList(), m_activeNamespace, index);
+        return next.has_value() ? m_workspaces[*next].get() : nullptr;
+      }
+    }
+    return nullptr;
+  }
+
+  Workspace* WorkspaceGroup::prevWorkspaceInNamespace(const Workspace* workspace) const {
+    if (workspace == nullptr || !namespaceVisible(workspace->namespaceId(), m_activeNamespace)) {
+      return nullptr;
+    }
+    for (size_t index = 0; index < m_workspaces.size(); ++index) {
+      if (m_workspaces[index].get() == workspace) {
+        const std::optional<size_t> prev = prevInNamespace(namespaceList(), m_activeNamespace, index);
+        return prev.has_value() ? m_workspaces[*prev].get() : nullptr;
+      }
+    }
+    return nullptr;
+  }
+
   void WorkspaceGroup::slideFinish() {
     m_slideAnim.snap(0.0);
     if (m_slide.base != nullptr) {
@@ -2127,9 +2264,10 @@ namespace umbriel {
     m_slide.base = m_active;
     m_slide.extent = extent;
     m_slide.progress = 0;
-    const size_t idx = m_active->index();
-    m_slide.previous = (includePrev && idx > 0) ? workspaceAt(idx - 1) : nullptr;
-    m_slide.next = includeNext ? workspaceAt(idx + 1) : nullptr;
+    // Swipe navigation stays inside the active namespace: neighbors skip
+    // hidden members rather than using global adjacency.
+    m_slide.previous = includePrev ? prevWorkspaceInNamespace(m_active) : nullptr;
+    m_slide.next = includeNext ? nextWorkspaceInNamespace(m_active) : nullptr;
     m_slide.base->beginSwitchTransition();
     if (m_slide.previous != nullptr) {
       m_slide.previous->beginSwitchTransition();
@@ -2281,7 +2419,13 @@ namespace umbriel {
       return;
     }
     Workspace* selected = workspace;
-    if (m_active == workspace && config().workspaces.backAndForth && m_previous != nullptr && m_previous != m_active) {
+    // back_and_forth never leaves the active namespace: a previous workspace
+    // hidden by another namespace is not restored.
+    if (m_active == workspace
+        && config().workspaces.backAndForth
+        && m_previous != nullptr
+        && m_previous != m_active
+        && namespaceVisible(m_previous->namespaceId(), m_activeNamespace)) {
       selected = m_previous;
     }
     activate(selected);
@@ -2293,9 +2437,11 @@ namespace umbriel {
     if (workspace == nullptr || m_active != workspace) {
       return;
     }
-    Workspace* fallback = workspaceAt(0);
+    // Prefer a fallback inside the active namespace so deactivation does not
+    // surface a hidden workspace.
+    Workspace* fallback = m_activeNamespace.empty() ? workspaceAt(0) : workspaceAtInNamespace(0);
     if (fallback == workspace) {
-      fallback = workspaceAt(1);
+      fallback = m_activeNamespace.empty() ? workspaceAt(1) : workspaceAtInNamespace(1);
     }
     if (fallback != nullptr) {
       activate(fallback, false);
@@ -2313,22 +2459,29 @@ namespace umbriel {
     if (!m_dynamic) {
       return nullptr;
     }
-    const auto empty = std::ranges::find_if(m_workspaces.rbegin(), m_workspaces.rend(), [](const auto& workspace) {
-      return !workspace->named() && !workspace->hasViews();
+    // Reuse the highest empty anonymous workspace in the active namespace:
+    // another namespace's sentinel must never back this group's navigation
+    // context.
+    const auto empty = std::ranges::find_if(m_workspaces.rbegin(), m_workspaces.rend(), [&](const auto& workspace) {
+      return !workspace->named()
+          && !workspace->hasViews()
+          && namespaceVisible(workspace->namespaceId(), m_activeNamespace);
     });
     if (empty != m_workspaces.rend()) {
       kLog.debug("using empty dynamic workspace for create request on {}", m_output->wlr()->name);
       return empty->get();
     }
-    return insertDynamicWorkspace(m_workspaces.size());
+    return insertDynamicWorkspace(m_workspaces.size(), m_activeNamespace);
   }
 
   Workspace* WorkspaceGroup::transferDestination() {
     if (m_dynamic) {
       return createWorkspace(nullptr);
     }
-    const auto empty = std::ranges::find_if(m_workspaces.rbegin(), m_workspaces.rend(), [](const auto& workspace) {
-      return !workspace->hasViews();
+    // Static groups reuse their highest empty configured workspace in the
+    // active namespace without changing its identity.
+    const auto empty = std::ranges::find_if(m_workspaces.rbegin(), m_workspaces.rend(), [&](const auto& workspace) {
+      return !workspace->hasViews() && namespaceVisible(workspace->namespaceId(), m_activeNamespace);
     });
     return empty != m_workspaces.rend() ? empty->get() : nullptr;
   }

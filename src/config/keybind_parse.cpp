@@ -170,6 +170,48 @@ namespace umbriel {
       return true;
     }
 
+    bool parseNamespaceArg(std::string_view arg, NamespaceArg& ns) {
+      // "[<name>][/<output>]": the name may be empty for the default
+      // namespace. Mirrors parseWorkspaceArg's single-`/` shape; namespace
+      // ids never contain `/` (see validNamespaceId).
+      std::string_view name = arg;
+      const size_t separator = name.find('/');
+      if (separator != std::string_view::npos) {
+        if (separator + 1 == name.size() || name.find('/', separator + 1) != std::string_view::npos) {
+          return false;
+        }
+        ns.output = std::string(name.substr(separator + 1));
+        name = name.substr(0, separator);
+      }
+      if (!validNamespaceId(name)) {
+        return false;
+      }
+      ns.name = std::string(name);
+      return true;
+    }
+
+    bool parseWorkspaceNamespaceArg(std::string_view arg, WorkspaceNamespaceArg& result) {
+      // "<workspace>[/<output>]=[<namespace>]": split at the last `=` so
+      // workspace names containing `=` keep working; namespace ids never
+      // contain `=` (see validNamespaceId). An empty namespace selects the
+      // default namespace.
+      const size_t separator = arg.rfind('=');
+      if (separator == std::string_view::npos) {
+        return false;
+      }
+      const std::string_view name = arg.substr(separator + 1);
+      if (!validNamespaceId(name)) {
+        return false;
+      }
+      WorkspaceArg workspace;
+      if (!parseWorkspaceArg(arg.substr(0, separator), workspace)) {
+        return false;
+      }
+      result.workspace = std::move(workspace);
+      result.namespaceId = std::string(name);
+      return true;
+    }
+
     constexpr ActionSpec kActionSpecs[] = {
         {"cheatsheet-close", "", "Hide the keybind cheatsheet", KeybindAction::CheatsheetClose},
         {"cheatsheet-open", "", "Show the keybind cheatsheet", KeybindAction::CheatsheetOpen},
@@ -211,6 +253,8 @@ namespace umbriel {
         {"layout-scroll-left", "", "Scroll the strip toward its start", KeybindAction::LayoutScrollLeft},
         {"layout-scroll-right", "", "Scroll the strip toward its end", KeybindAction::LayoutScrollRight},
         {"layout-scroll-up", "", "Scroll the strip toward its start", KeybindAction::LayoutScrollUp},
+        {"namespace-switch", "[<namespace>][/<output>]", "Switch the active workspace namespace on one output",
+         KeybindAction::NamespaceSwitch, ActionArgKind::Namespace},
         {"output-focus-down", "", "Focus the output below", KeybindAction::OutputFocusDown},
         {"output-focus-left", "", "Focus the output to the left", KeybindAction::OutputFocusLeft},
         {"output-focus-next", "", "Focus the next output, wrapping around", KeybindAction::OutputFocusNext},
@@ -354,6 +398,9 @@ namespace umbriel {
         {"workspace-previous", "", "Switch to the previous workspace on this output", KeybindAction::WorkspacePrevious},
         {"workspace-set-layout", "<scrolling|dwindle|master|toggle>", "Set the active workspace's layout mode",
          KeybindAction::WorkspaceSetLayout, ActionArgKind::LayoutMode},
+        {"workspace-set-namespace", "<workspace>[/<output>]=[<namespace>]",
+         "Move a workspace to the selected namespace", KeybindAction::WorkspaceSetNamespace,
+         ActionArgKind::WorkspaceNamespace},
         {"workspace-swap-active-output-down", "", "Swap active workspace windows with the output below",
          KeybindAction::WorkspaceSwapActiveOutputDown},
         {"workspace-swap-active-output-left", "", "Swap active workspace windows with the output left",
@@ -591,6 +638,35 @@ namespace umbriel {
           return true;
         }
         break;
+      case ActionArgKind::Namespace: {
+        if (value == spec.name) {
+          output.action = spec.action;
+          output.payload = NamespaceArg{};
+          return true;
+        }
+        if (!takeActionArg(value, spec, arg)) {
+          break;
+        }
+        NamespaceArg ns;
+        if (!parseNamespaceArg(arg, ns)) {
+          break;
+        }
+        output.action = spec.action;
+        output.payload = std::move(ns);
+        return true;
+      }
+      case ActionArgKind::WorkspaceNamespace: {
+        if (!takeActionArg(value, spec, arg)) {
+          break;
+        }
+        WorkspaceNamespaceArg result;
+        if (!parseWorkspaceNamespaceArg(arg, result)) {
+          break;
+        }
+        output.action = spec.action;
+        output.payload = std::move(result);
+        return true;
+      }
       case ActionArgKind::LayoutMode:
         if (takeActionArg(value, spec, arg)) {
           if (arg == "scrolling") {

@@ -149,6 +149,8 @@ namespace umbriel {
     WindowCycleSecondaryExtentBack,
     WindowFocusLast,
     WorkspaceFocusLast,
+    NamespaceSwitch,
+    WorkspaceSetNamespace,
     Count,
   };
 
@@ -206,10 +208,27 @@ namespace umbriel {
     bool skipConfirmation = false;
     bool operator==(const QuitArg&) const = default;
   };
+  // Workspace namespace id. Empty selects the default namespace, which
+  // preserves existing behavior. `/` and `=` are rejected: `/` separates the
+  // output qualifier and `=` separates the workspace selector of
+  // workspace-set-namespace.
+  [[nodiscard]] inline bool validNamespaceId(std::string_view name) {
+    return !name.contains('/') && !name.contains('=');
+  }
+  struct NamespaceArg {
+    std::string name;   // empty = the default namespace
+    std::string output; // empty = the cursor-preferred output
+    bool operator==(const NamespaceArg&) const = default;
+  };
+  struct WorkspaceNamespaceArg {
+    WorkspaceArg workspace;
+    std::string namespaceId; // empty = the default namespace
+    bool operator==(const WorkspaceNamespaceArg&) const = default;
+  };
 
   using KeybindPayload = std::variant<
       std::monostate, SpawnArg, SubmapArg, FractionArg, WorkspaceArg, OutputArg, ScratchpadArg, WindowIdArg,
-      LayoutModeArg, QuitArg>;
+      LayoutModeArg, QuitArg, NamespaceArg, WorkspaceNamespaceArg>;
 
   struct Keybind {
     // What triggers the bind.
@@ -267,7 +286,9 @@ namespace umbriel {
     OptionalWindowId,
     FractionDelta,
     LayoutMode,
-    SkipConfirmation
+    SkipConfirmation,
+    Namespace,
+    WorkspaceNamespace
   };
 
   struct ActionSpec {
